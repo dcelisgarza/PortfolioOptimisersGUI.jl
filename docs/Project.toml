@@ -1,0 +1,10 @@
+[deps]
+Documenter = "e30172f5-a6a5-5a46-863b-614d45cd2de4"
+LiveServer = "16fef848-5104-11e9-1b77-fb7a48bbb589"
+PortfolioOptimisersGUI = "54ab21c9-f8d7-5af7-a33b-8d663c3a89b5"
+
+[compat]
+Documenter = "1"
+
+[sources]
+PortfolioOptimisersGUI = {path = ".."}

@@ -1,0 +1,43 @@
+# Changes here will be overwritten by Copier
+AddAllcontributors: true
+AddChangelog: true
+AddCitationCFF: true
+AddCodeOfConduct: true
+AddContributionDocs: true
+AddCopierCI: true
+AddDocs: true
+AddDocsCI: true
+AddFormatterAndLinterConfigFiles: true
+AddGitHubPRTemplate: true
+AddGitHubTemplates: true
+AddLintCI: true
+AddLychee: true
+AddMacToCI: false
+AddPrecommit: true
+AddPrecommitUpdateCI: true
+AddTagBotCI: true
+AddTestCI: true
+AddWinToCI: false
+Authors: Daniel Celis Garza <daniel.celis.garza@gmail.com>
+CheckExplicitImports: true
+CodeOfConductContact: daniel.celis.garza@gmail.com
+ConfigIndentation: 2
+ExplicitImportsChecklist: exclude_all_qualified_accesses_are_public
+GitHubActionVersionAutoUpdate: dependabot
+JuliaCompatAutoUpdate: dependabot
+JuliaIndentation: 4
+JuliaMinCIVersion: '1.12'
+JuliaMinVersion: '1.12'
+License: MIT
+LicenseCopyrightHolders: Daniel Celis Garza
+MarkdownIndentation: 2
+PackageName: PortfolioOptimisersGUI
+PackageOwner: dcelisgarza
+PackageUUID: 54ab21c9-f8d7-5af7-a33b-8d663c3a89b5
+RunJuliaNightlyOnCI: true
+StrategyConfirmIncluded: true
+StrategyLevel: 2
+StrategyReviewExcluded: true
+TestingStrategy: basic_auto_discover
+UseCirrusCI: false
+_src_path: /home/danielcelisgarza/.julia/packages/BestieTemplate/6QVd6
