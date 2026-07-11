@@ -1,0 +1,5 @@
+[deps]
+Bonito = "824d6782-a2ef-11e9-3a09-e5662e0c26f8"
+Clarabel = "61c947e1-3e6d-4ee4-985a-eec8c727bd6e"
+PortfolioOptimisers = "e0036ec9-05e5-505d-a6a9-07af41c94861"
+ShoelaceWidgets = "1dc53738-a592-4c0c-95ab-f92b84dc4c89"
