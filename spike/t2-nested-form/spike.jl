@@ -20,15 +20,21 @@ const PO = PortfolioOptimisers
 
 "Optimizer factories from any JuMP-capable package currently loaded."
 function detected_solvers()
-    out = Pair{String, Any}[]
+    out = Pair{String,Any}[]
     for m in names(Main; imported = true)
-        mod = try getfield(Main, m) catch; continue end
+        mod = try
+            getfield(Main, m)
+        catch
+            ; continue
+        end
         mod isa Module || continue
         isdefined(mod, :Optimizer) || continue
         O = getfield(mod, :Optimizer)
         try
-            MOI.get(MOI.instantiate(O; with_cache_type = Float64,
-                                    with_bridge_type = Float64), MOI.SolverName())
+            MOI.get(
+                MOI.instantiate(O; with_cache_type = Float64, with_bridge_type = Float64),
+                MOI.SolverName(),
+            )
             push!(out, string(m) => O)
         catch
         end
@@ -37,8 +43,8 @@ function detected_solvers()
 end
 
 # slot overrides: (Type, field) => widget builder / default-value supplier
-const OVERRIDES = Dict{Tuple{Any, Symbol}, Function}()
-const SLOT_DEFAULT = Dict{Tuple{Any, Symbol}, Function}()
+const OVERRIDES = Dict{Tuple{Any,Symbol},Function}()
+const SLOT_DEFAULT = Dict{Tuple{Any,Symbol},Function}()
 
 wrapper(T) = Base.unwrap_unionall(T).name.wrapper
 
@@ -79,7 +85,8 @@ function classify(ty)
             continue
         end
         u = Base.unwrap_unionall(b)
-        if u isa DataType && u.name.name in (:AbstractVector, :AbstractArray, :AbstractMatrix)
+        if u isa DataType &&
+           u.name.name in (:AbstractVector, :AbstractArray, :AbstractMatrix)
             list = true          # a vector branch => this slot accepts a list
             continue             # element type is (near enough) the scalar branch
         end
@@ -91,13 +98,21 @@ end
 
 "Name of a type, safe for Unions and other exotica."
 function shortname(T)
-    u = try Base.unwrap_unionall(T) catch; return string(T) end
+    u = try
+        Base.unwrap_unionall(T)
+    catch
+        ; return string(T)
+    end
     (u isa DataType) ? string(u.name.name) : string(T)
 end
 
 "Is T something we can actually offer as a constructible choice?"
 function offerable(T)
-    u = try Base.unwrap_unionall(T) catch; return false end
+    u = try
+        Base.unwrap_unionall(T)
+    catch
+        ; return false
+    end
     u isa DataType || return false           # rejects Unions
     isabstracttype(u) && return false
     fieldcount(u) >= 0 || return false
@@ -114,7 +129,11 @@ function concretes(A::Type)
         T = pop!(stack)
         T in seen && continue
         push!(seen, T)
-        subs = try InteractiveUtils.subtypes(T) catch; Type[] end
+        subs = try
+            InteractiveUtils.subtypes(T)
+        catch
+            ; Type[]
+        end
         for S in subs
             u = Base.unwrap_unionall(S)
             if u isa DataType && isabstracttype(u)
@@ -138,7 +157,11 @@ function options_for(core)
     for b in branches
         b === Nothing && continue
         _scalarish(b) && continue            # leaf scalars get widgets, not pickers
-        u = try Base.unwrap_unionall(b) catch; continue end
+        u = try
+            Base.unwrap_unionall(b)
+        catch
+            ; continue
+        end
         u isa DataType || continue
         if isabstracttype(u)
             append!(out, concretes(b))
@@ -151,15 +174,36 @@ function options_for(core)
     return out
 end
 
-_scalarish(b) = b === Nothing || b === Bool || b === Symbol ||
-                (b isa DataType && (b <: Number || b <: AbstractString))
-is_scalar(core) = core === Any ? false :
-                  core isa Union ? all(_scalarish, Base.uniontypes(core)) : _scalarish(core)
+_scalarish(b) =
+    b === Nothing ||
+    b === Bool ||
+    b === Symbol ||
+    (b isa DataType && (b <: Number || b <: AbstractString))
+is_scalar(core) =
+    core === Any ? false :
+    core isa Union ? all(_scalarish, Base.uniontypes(core)) : _scalarish(core)
+
+"""
+The scalar branch of a union, if it has one alongside composite branches.
+
+`bgt :: Union{Nothing, Number, BudgetConstraintEstimator, TimeDependent}` is the
+motivating case: the slot takes EITHER a plain number OR an estimator object. A
+subtype picker alone strands the number; a number box alone hides the estimators.
+"""
+function scalar_branch_of(core)
+    core isa Union || return nothing
+    branches = Base.uniontypes(core)
+    sc = filter(b -> b !== Nothing && _scalarish(b), branches)
+    comp = filter(b -> b !== Nothing && !_scalarish(b), branches)
+    (isempty(sc) || isempty(comp)) && return nothing   # not mixed => not hybrid
+    return first(sc)
+end
 
 "Slots reflection cannot describe: no concrete options, not a scalar."
 const OPAQUE = (Any, NamedTuple, Pair, AbstractDict, Function)
-_opaque1(b) = b === Any ||
-              any(O -> b === O || Base.unwrap_unionall(b) === Base.unwrap_unionall(O), OPAQUE)
+_opaque1(b) =
+    b === Any ||
+    any(O -> b === O || Base.unwrap_unionall(b) === Base.unwrap_unionall(O), OPAQUE)
 is_opaque(core) = core isa Union ? any(_opaque1, Base.uniontypes(core)) : _opaque1(core)
 
 "Best-effort default instance of T, filling required kwargs recursively."
@@ -170,10 +214,10 @@ function default_for(T::Type; depth = 0)
     catch e
         e isa UndefKeywordError || return nothing
         # required kwargs: fill them from their slot types, recursively
-        kw = Dict{Symbol, Any}()
+        kw = Dict{Symbol,Any}()
         names = fieldnames(T)
         types = slot_types(T)
-        for _ in 1:length(names)
+        for _ = 1:length(names)
             try
                 return T(; kw...)
             catch e2
@@ -188,7 +232,8 @@ function default_for(T::Type; depth = 0)
                 c = classify(types[i])
                 opts = options_for(c.core)
                 cand = isempty(opts) ? nothing : first(opts)
-                kw[e2.var] = cand === nothing ? nothing : default_for(cand; depth = depth + 1)
+                kw[e2.var] =
+                    cand === nothing ? nothing : default_for(cand; depth = depth + 1)
             end
         end
         return nothing
@@ -198,8 +243,8 @@ end
 "Kwargs of T that have NO default (must be supplied)."
 function required_kwargs(T::Type)
     req = Symbol[]
-    kw = Dict{Symbol, Any}()
-    for _ in 1:fieldcount(T)
+    kw = Dict{Symbol,Any}()
+    for _ = 1:fieldcount(T)
         try
             T(; kw...)
             break
@@ -216,14 +261,28 @@ end
 # 2. Spec IR — what the form edits. A tree of (type, kwargs), materialised on demand.
 # ---------------------------------------------------------------------------
 
+"""
+Explicit `nothing`, as distinct from "unset".
+
+For `bgt :: Union{Nothing, Number, …}` whose library default is `1.0`, these are
+THREE different intents:
+
+  * unset            -> omit the kwarg  -> library default applies (bgt = 1.0)
+  * Explicit()       -> pass `nothing`  -> bgt = nothing (constraint disabled)
+  * 0.85 / BudgetRange -> pass the value
+
+`nothing` in the spec means "unset", so explicit nothing needs its own sentinel.
+"""
+struct Explicit end
+
 mutable struct Node
     T::Type
-    kw::Dict{Symbol, Any}      # Symbol => Node | Vector{Node} | scalar | nothing
-    libdefault::Dict{Symbol, String}   # what the LIBRARY defaults this slot to, if unset
+    kw::Dict{Symbol,Any}      # Symbol => Node | Vector{Node} | scalar | Explicit | nothing
+    libdefault::Dict{Symbol,String}   # what the LIBRARY defaults this slot to, if unset
 end
 
 function Node(T::Type)
-    n = Node(T, Dict{Symbol, Any}(), Dict{Symbol, String}())
+    n = Node(T, Dict{Symbol,Any}(), Dict{Symbol,String}())
     inst = default_for(T)
     names, types = fieldnames(T), slot_types(T)
     req = required_kwargs(T)
@@ -237,14 +296,18 @@ function Node(T::Type)
             n.kw[f] = isempty(opts) ? nothing : Node(first(opts))
         elseif inst !== nothing
             v = getfield(inst, f)
-            if v !== nothing && !(is_scalar(c.core) || v isa Number || v isa Bool || v isa AbstractString)
-                # a composite the library defaults for us: leave it UNSET (so code
-                # export stays minimal) but remember what the default actually is.
-                n.libdefault[f] = shortname(typeof(v))
+            scalarv = v isa Number || v isa Bool || v isa AbstractString
+            if v === nothing
+                n.kw[f] = nothing
+            elseif is_scalar(c.core) && scalarv
+                n.kw[f] = v                      # a plain scalar slot: hold the value
+            else
+                # Either a composite, or a HYBRID slot whose default happens to be a
+                # number (bgt = 1.0). Leave it UNSET so the code export stays minimal,
+                # but remember the default so the picker can show it.
+                n.libdefault[f] = scalarv ? repr(v) : shortname(typeof(v))
+                n.kw[f] = nothing
             end
-            n.kw[f] = v === nothing ? nothing :
-                      (is_scalar(c.core) || v isa Number || v isa Bool || v isa AbstractString) ? v :
-                      nothing   # non-required composites start collapsed/nothing (= library default)
         else
             n.kw[f] = nothing
         end
@@ -254,24 +317,28 @@ end
 
 "Turn the spec back into a real PortfolioOptimisers object."
 function materialise(n::Node)
-    kw = Dict{Symbol, Any}()
+    kw = Dict{Symbol,Any}()
     for (k, v) in n.kw
-        v === nothing && continue          # omit => library default applies
-        kw[k] = v isa Node ? materialise(v) :
-                v isa Vector{Node} ? [materialise(x) for x in v] : v
+        v === nothing && continue          # unset => omit => library default applies
+        kw[k] =
+            v isa Explicit ? nothing : # explicit nothing => pass it
+            v isa Node ? materialise(v) :
+            v isa Vector{Node} ? [materialise(x) for x in v] : v
     end
     return n.T(; kw...)
 end
 
 "Code export — the constructor call the user could paste into the REPL."
 function to_code(n::Node; indent = 0)
-    pad, pad2 = "    "^indent, "    "^(indent + 1)
+    pad, pad2 = "  "^indent, "  "^(indent + 1)
     parts = String[]
     for (k, v) in sort(collect(n.kw); by = first)
         v === nothing && continue
-        s = v isa Node ? to_code(v; indent = indent + 1) :
-            v isa Vector{Node} ? "[" * join([to_code(x; indent = indent + 1) for x in v], ", ") * "]" :
-            repr(v)
+        s =
+            v isa Explicit ? "nothing" :
+            v isa Node ? to_code(v; indent = indent + 1) :
+            v isa Vector{Node} ?
+            "[" * join([to_code(x; indent = indent + 1) for x in v], ", ") * "]" : repr(v)
         push!(parts, "$pad2$k = $s")
     end
     nm = shortname(n.T)
@@ -290,23 +357,34 @@ end
 function scalar_widget(node::Node, f::Symbol, v)
     if v isa Bool
         cb = Checkbox(v)
-        on(cb.value) do x; node.kw[f] = x; end
+        on(cb.value) do x
+            ;
+            node.kw[f] = x;
+        end
         return cb
     elseif v isa Number
         ni = NumberInput(Float64(v))
-        on(ni.value) do x; node.kw[f] = x; end
+        on(ni.value) do x
+            ;
+            node.kw[f] = x;
+        end
         return ni
     else
         tf = TextField(v === nothing ? "" : string(v))
-        on(tf.value) do x; node.kw[f] = isempty(x) ? nothing : x; end
+        on(tf.value) do x
+            ;
+            node.kw[f] = isempty(x) ? nothing : x;
+        end
         return tf
     end
 end
 
 "Render one slot (field f of node). Returns a DOM row."
-labelled(f, w...) = DOM.div(DOM.label(string(f);
-                                      style = "font-weight:600;width:9em;display:inline-block"),
-                            w...; style = "margin:4px 0")
+labelled(f, w...) = DOM.div(
+    DOM.label(string(f); style = "font-weight:600;width:9em;display:inline-block"),
+    w...;
+    style = "margin:4px 0",
+)
 
 function slot_row(node::Node, f::Symbol, ty, on_dirty)
     c = classify(ty)
@@ -320,43 +398,80 @@ function slot_row(node::Node, f::Symbol, ty, on_dirty)
 
     # --- reflection dead end, and nobody overrode it
     if is_opaque(c.core)
-        return DOM.div(DOM.label(string(f); style = "width:9em;display:inline-block"),
-                       DOM.em("opaque slot ($(ty)) — needs an override");
-                       style = "margin:4px 0;color:#bf616a")
+        return DOM.div(
+            DOM.label(string(f); style = "width:9em;display:inline-block"),
+            DOM.em("opaque slot ($(ty)) — needs an override");
+            style = "margin:4px 0;color:#bf616a",
+        )
     end
 
-    # --- scalar leaf
-    if is_scalar(c.core) && !(cur isa Node)
-        w = scalar_widget(node, f, cur === nothing ? (c.optional ? "" : 0.0) : cur)
+    # --- plain scalar leaf: mandatory AND purely scalar (sc::Number, brt::Bool).
+    # Nothing to choose between, so no mode selector — just the box.
+    if is_scalar(c.core) && !c.optional && !(cur isa Node)
+        w = scalar_widget(node, f, cur === nothing ? 0.0 : cur)
         on(x -> on_dirty(), w.value)
-        return DOM.div(DOM.label(string(f); style = "font-weight:600;width:9em;display:inline-block"),
-                       w; style = "margin:4px 0")
+        return DOM.div(
+            DOM.label(string(f); style = "font-weight:600;width:9em;display:inline-block"),
+            w;
+            style = "margin:4px 0",
+        )
     end
 
     opts = options_for(c.core)
-    if isempty(opts)
-        return DOM.div(DOM.label(string(f)), DOM.em(" (unsupported slot: $(ty))");
-                       style = "margin:4px 0;color:#999")
+    # a slot is scalar-capable if it IS a scalar, or has a scalar branch among composites
+    has_scalar = is_scalar(c.core) || scalar_branch_of(c.core) !== nothing
+    if isempty(opts) && !has_scalar
+        return DOM.div(
+            DOM.label(string(f)),
+            DOM.em(" (unsupported slot: $(ty))");
+            style = "margin:4px 0;color:#999",
+        )
     end
 
-    # --- composite slot: subtype picker + re-rendered subtree
+    # --- HYBRID slot: the union mixes a scalar branch with composite branches,
+    # e.g. bgt :: Union{Nothing, Number, BudgetConstraintEstimator, TimeDependent}.
+    # A picker alone would strand the number (uneditable); a number box alone
+    # would hide the estimators. The mode selector offers BOTH — plus `nothing`.
     labels = shortname.(opts)
+    SCALAR = has_scalar ? "number…" : nothing
     subtree = Observable{Any}(DOM.div())
 
     function rebuild!()
         v = node.kw[f]
-        if v isa Node
-            subtree[] = DOM.div(form_for(v, on_dirty);
-                                style = "margin-left:1.2em;padding-left:.8em;border-left:2px solid #d8dee9")
+        if v isa Number || v isa AbstractString || v isa Bool
+            # scalar mode: an editable box, live-bound back into the spec
+            w = scalar_widget(node, f, v)
+            on(x -> on_dirty(), w.value)
+            subtree[] = DOM.div(w; style = "margin-left:1.2em")
+        elseif v isa Node
+            subtree[] = DOM.div(
+                form_for(v, on_dirty);
+                style = "margin-left:1.2em;padding-left:.8em;border-left:2px solid #d8dee9",
+            )
         elseif v isa Vector{Node}
             rows = map(enumerate(v)) do (i, child)
                 del = Button("remove")
                 on(del) do _
-                    deleteat!(node.kw[f], i); rebuild!(); on_dirty()
+                    deleteat!(node.kw[f], i)
+                    rebuild!()
+                    on_dirty()
                 end
-                DOM.div(DOM.div(DOM.strong("[$i] $(shortname(child.T))"), del),
-                        form_for(child, on_dirty);
-                        style = "margin-left:1.2em;padding-left:.8em;border-left:2px solid #a3be8c;margin-top:6px")
+                # each entry owns its type: a list of risk measures is a list of
+                # DIFFERENT risk measures, so every row needs its own picker.
+                rowsel = Dropdown(
+                    labels;
+                    index = something(findfirst(==(shortname(child.T)), labels), 1),
+                )
+                on(rowsel.value) do choice
+                    node.kw[f][i] = Node(opts[findfirst(==(choice), labels)])
+                    rebuild!()
+                    on_dirty()
+                end
+                DOM.div(
+                    DOM.div(DOM.strong("[$i] "), rowsel, del),
+                    form_for(child, on_dirty);
+                    style = "margin-left:1.2em;padding-left:.8em;border-left:2px solid #a3be8c;margin-top:6px",
+                )
             end
             subtree[] = DOM.div(rows...)
         else
@@ -364,38 +479,96 @@ function slot_row(node::Node, f::Symbol, ty, on_dirty)
         end
     end
 
-    # picker. The first entry means "leave unset" — and it names the library's
-    # own default so the user can SEE what they get by doing nothing.
-    unset = haskey(node.libdefault, f) ? "— default: $(node.libdefault[f]) —" : "— unset —"
-    sel = Dropdown([unset; labels];
-                   index = cur isa Node ? findfirst(==(shortname(cur.T)), labels) + 1 : 1)
+    # Mode selector. First entry = "leave unset", naming the library's own default
+    # so the user can SEE what doing nothing gets them. On a hybrid slot the scalar
+    # branch appears as its own mode ("number…").
+    has_default = haskey(node.libdefault, f)
+    unset = has_default ? "— default: $(node.libdefault[f]) —" : "— unset —"
+
+    # `nothing` is a LEGAL VALUE for an optional slot, and it differs from omitting
+    # whenever the library's default is something else (bgt defaults to 1.0, so
+    # `nothing` means "disable the budget constraint" — not the same as omitting).
+    # Where the default IS nothing, the two coincide and one entry suffices.
+    NOTHING = (c.optional && has_default) ? "nothing (disable)" : nothing
+
+    choices = String[unset]
+    NOTHING === nothing || push!(choices, NOTHING)
+    SCALAR === nothing || push!(choices, SCALAR)
+    append!(choices, labels)
+
+    idx = if cur isa Node
+        something(findfirst(==(shortname(cur.T)), choices), 1)
+    elseif cur isa Explicit
+        something(findfirst(==(NOTHING), choices), 1)
+    elseif cur isa Number || cur isa AbstractString || cur isa Bool
+        something(findfirst(==(SCALAR), choices), 1)
+    else
+        1
+    end
+
+    sel = Dropdown(choices; index = idx)
+
+    # Which concrete type does "+ add" append? The one the picker names; and if the
+    # picker is on a non-type entry (unset/nothing/number), the LIBRARY DEFAULT —
+    # never merely the alphabetically-first subtype.
+    function default_type()
+        i = has_default ? findfirst(==(node.libdefault[f]), labels) : nothing
+        return i === nothing ? opts[1] : opts[i]
+    end
+    function add_type()
+        i = findfirst(==(sel.value[]), labels)
+        return i === nothing ? default_type() : opts[i]
+    end
+
     on(sel.value) do choice
         if choice == unset
             node.kw[f] = nothing
+        elseif choice == NOTHING
+            node.kw[f] = Explicit()
+        elseif choice == SCALAR
+            # entering scalar mode: seed with the library default if it was a
+            # number, else zero. rebuild! then renders the editable box.
+            prev = node.kw[f]
+            node.kw[f] = prev isa Number ? prev : 0.0
         else
             T = opts[findfirst(==(choice), labels)]
             node.kw[f] = Node(T)
         end
-        rebuild!(); on_dirty()
+        rebuild!();
+        on_dirty()
     end
 
     controls = Any[sel]
     if c.list
         addb = Button("+ add")
         on(addb) do _
-            T = opts[1]
-            if !(node.kw[f] isa Vector{Node})
-                node.kw[f] = node.kw[f] isa Node ? Node[node.kw[f]] : Node[]
+            v = node.kw[f]
+            if v isa Vector{Node}
+                # already a list: append one of whatever the picker currently names
+                push!(v, Node(add_type()))
+            elseif v isa Node
+                # FIRST add on a slot holding a single value: promote scalar -> vector,
+                # carrying the existing value in. Do NOT also append a new element.
+                node.kw[f] = Node[v]
+            else
+                # unset / nothing: the list starts as the value it would have had
+                node.kw[f] = Node[Node(default_type())]
             end
-            push!(node.kw[f], Node(T)); rebuild!(); on_dirty()
+            rebuild!()
+            on_dirty()
         end
         push!(controls, addb)
     end
 
     rebuild!()
-    return DOM.div(DOM.div(DOM.label(string(f); style = "font-weight:600;width:9em;display:inline-block"),
-                           controls...; style = "margin:6px 0"),
-                   subtree)
+    return DOM.div(
+        DOM.div(
+            DOM.label(string(f); style = "font-weight:600;width:9em;display:inline-block"),
+            controls...;
+            style = "margin:6px 0",
+        ),
+        subtree,
+    )
 end
 
 "Recursive form for a node: required/basic slots visible, the rest in a <details>."
@@ -417,10 +590,14 @@ function form_for(node::Node, on_dirty)
 
     children = Any[DOM.div(basic...)]
     if !isempty(advanced)
-        push!(children,
-              DOM.details(DOM.summary("advanced ($(length(advanced)) more)"),
-                          DOM.div(advanced...);
-                          style = "margin-top:6px;color:#4c566a"))
+        push!(
+            children,
+            DOM.details(
+                DOM.summary("advanced ($(length(advanced)) more)"),
+                DOM.div(advanced...);
+                style = "margin-top:6px;color:#4c566a",
+            ),
+        )
     end
     return DOM.div(children...)
 end
@@ -438,8 +615,10 @@ end
 OVERRIDES[(PO.Solver, :solver)] = function (node, f, on_dirty)
     ds = detected_solvers()
     if isempty(ds)
-        return DOM.em("no JuMP solver loaded — `using Clarabel` and reload";
-                      style = "color:#bf616a")
+        return DOM.em(
+            "no JuMP solver loaded — `using Clarabel` and reload";
+            style = "color:#bf616a",
+        )
     end
     labels = first.(ds)
     cur = node.kw[f]
@@ -450,7 +629,10 @@ OVERRIDES[(PO.Solver, :solver)] = function (node, f, on_dirty)
         node.kw[f] = ds[findfirst(==(choice), labels)][2]
         on_dirty()
     end
-    return DOM.div(sel, DOM.small(" (detected from loaded packages)"; style = "color:#7b8794"))
+    return DOM.div(
+        sel,
+        DOM.small(" (detected from loaded packages)"; style = "color:#7b8794"),
+    )
 end
 
 # ---------------------------------------------------------------------------
@@ -475,18 +657,31 @@ function spike_app()
             end
         end
 
-        formdiv = DOM.div(form_for(root, on_dirty);
-                          style = "font-family:ui-monospace,monospace;font-size:13px")
+        formdiv = DOM.div(
+            form_for(root, on_dirty);
+            style = "font-family:ui-monospace,monospace;font-size:13px",
+        )
 
-        left = DOM.div(DOM.h2("MeanRisk — reflection-generated form"), formdiv;
-                       style = "flex:1;min-width:0;overflow:auto;max-height:90vh")
-        right = DOM.div(DOM.h2("Captured back out"), buildb,
-                        DOM.pre(built; style = "background:#eceff4;padding:8px;white-space:pre-wrap"),
-                        DOM.h3("Code export"),
-                        DOM.pre(code; style = "background:#2e3440;color:#d8dee9;padding:10px;overflow:auto"),
-                        style = "flex:1;min-width:0")
+        left = DOM.div(
+            DOM.h2("MeanRisk — reflection-generated form"),
+            formdiv;
+            style = "flex:1;min-width:0;overflow:auto;max-height:90vh",
+        )
+        right = DOM.div(
+            DOM.h2("Captured back out"),
+            buildb,
+            DOM.pre(built; style = "background:#eceff4;padding:8px;white-space:pre-wrap"),
+            DOM.h3("Code export"),
+            DOM.pre(
+                code;
+                style = "background:#2e3440;color:#d8dee9;padding:10px;overflow:auto",
+            ),
+            style = "flex:1;min-width:0",
+        )
 
-        return DOM.div(DOM.div(left, right; style = "display:flex;gap:24px;align-items:flex-start"),
-                       style = "font-family:system-ui;padding:16px")
+        return DOM.div(
+            DOM.div(left, right; style = "display:flex;gap:24px;align-items:flex-start"),
+            style = "font-family:system-ui;padding:16px",
+        )
     end
 end

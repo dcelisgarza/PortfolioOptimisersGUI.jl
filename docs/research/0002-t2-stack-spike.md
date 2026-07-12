@@ -59,6 +59,28 @@ A slot left unset gets the library's default, but the user cannot *see* what tha
 
 Consequence: **the Spec IR should store overrides, not a fully-populated tree.** The code export then contains only what the user actually chose. **Feeds T6.**
 
+### 3b. A slot has FOUR states, not two — and a union can mix scalar with composite
+
+`bgt :: Union{Nothing, Number, BudgetConstraintEstimator, TimeDependent}` (also `sbgt`, `ss`, `card`, `nea`, `l1`, `l2`…) is not a picker slot *or* a number slot. It is both, and the user must be able to reach each of:
+
+| State | Meaning | Emitted |
+| --- | --- | --- |
+| **unset** | omit the kwarg | *(nothing emitted)* → library default, `bgt = 1.0` |
+| **explicit `nothing`** | pass `nothing` | `bgt = nothing` → budget constraint **disabled** |
+| **scalar** | a plain number | `bgt = 0.85` |
+| **composite** | an estimator | `bgt = BudgetRange(; …)` |
+
+**Unset and explicit-`nothing` are different intents** whenever the library's default isn't `nothing` — omitting `bgt` gives you `1.0`, passing `nothing` disables it. A spec IR that represents "unset" *as* `nothing` cannot tell them apart; the spike needs a distinct `Explicit()` sentinel. **Feeds T5 (mode selector UX) and T6 (the IR must encode all four).**
+
+### 3c. Scalar-or-vector slots: the first add PROMOTES, it does not append
+
+`r :: Union{RiskMeasure, AbstractVector{<:RiskMeasure}}` and `slv :: Union{Solver, AbstractVector{<:Solver}}` accept one value *or* many. The rule that works:
+
+- **first add** → promote the value the slot already has (an explicit choice, or the *library default*) into a one-element vector. Do **not** also append.
+- **subsequent adds** → append.
+
+The naive alternative (always append `subtypes(A)[1]`) produces exactly the observed bug: adding one risk measure silently yields `[AverageDrawdown, <yours>]`, because `AverageDrawdown` is merely alphabetically first. **Never let a picker default to "alphabetically first" when a library default exists.** Each list row also needs its own type picker — a list of risk measures is a list of *different* risk measures. **Feeds T5.**
+
 ### 4. Required vs defaulted kwargs is discoverable, but only by probing
 
 `MeanRisk` requires `opt`; `JuMPOptimiser` requires `slv`; `Solver` requires `solver`. There is no reflective list of "kwargs without defaults" — the spike recovers it by calling `T(; kw...)` and catching `UndefKeywordError` in a loop (`required_kwargs`). It works, but it's a probe, not an introspection. An alternative (parsing defaults out of the source) is a T4 question.
