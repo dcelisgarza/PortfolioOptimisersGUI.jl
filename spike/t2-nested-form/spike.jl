@@ -453,7 +453,11 @@ function slot_row(node::Node, f::Symbol, ty, on_dirty)
                 del = Button("remove")
                 on(del) do _
                     deleteat!(node.kw[f], i)
+                    # an emptied list falls back to unset, so the picker resumes
+                    # acting as the single-value selector
+                    isempty(node.kw[f]) && (node.kw[f] = nothing)
                     rebuild!()
+                    refresh_hint()
                     on_dirty()
                 end
                 # each entry owns its type: a list of risk measures is a list of
@@ -520,7 +524,25 @@ function slot_row(node::Node, f::Symbol, ty, on_dirty)
         return i === nothing ? default_type() : opts[i]
     end
 
+    # The slot's mode is otherwise invisible — say it out loud, so the picker's
+    # changed meaning in list mode is legible instead of surprising.
+    hint = Observable("")
+    function refresh_hint()
+        v = node.kw[f]
+        hint[] = v isa Vector{Node} ?
+                 "list of $(length(v)) · picker chooses what “+ add” appends" : ""
+    end
+
     on(sel.value) do choice
+        # LIST MODE: the slot already holds a vector, so the picker is no longer
+        # "the value" — it names what "+ add" will append. Selecting a type here
+        # must NOT replace the list (that silently destroyed the entries already
+        # in it). Emptying the list via `remove` is how you get back to a single
+        # value; `— unset —` clears it outright.
+        if node.kw[f] isa Vector{Node} && findfirst(==(choice), labels) !== nothing
+            refresh_hint()
+            return
+        end
         if choice == unset
             node.kw[f] = nothing
         elseif choice == NOTHING
@@ -555,9 +577,11 @@ function slot_row(node::Node, f::Symbol, ty, on_dirty)
                 node.kw[f] = Node[Node(default_type())]
             end
             rebuild!()
+            refresh_hint()
             on_dirty()
         end
         push!(controls, addb)
+        push!(controls, DOM.small(hint; style = "color:#7b8794;margin-left:.6em"))
     end
 
     rebuild!()

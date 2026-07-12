@@ -79,7 +79,9 @@ Consequence: **the Spec IR should store overrides, not a fully-populated tree.**
 - **first add** → promote the value the slot already has (an explicit choice, or the *library default*) into a one-element vector. Do **not** also append.
 - **subsequent adds** → append.
 
-The naive alternative (always append `subtypes(A)[1]`) produces exactly the observed bug: adding one risk measure silently yields `[AverageDrawdown, <yours>]`, because `AverageDrawdown` is merely alphabetically first. **Never let a picker default to "alphabetically first" when a library default exists.** Each list row also needs its own type picker — a list of risk measures is a list of *different* risk measures. **Feeds T5.**
+The naive alternative (always append `subtypes(A)[1]`) produces exactly the observed bug: adding one risk measure silently yields `[AverageDrawdown, <yours>]`, because `AverageDrawdown` is merely alphabetically first. **Never let a picker default to "alphabetically first" when a library default exists.** Each list row also needs its own type picker — a list of risk measures is a list of *different* risk measures.
+
+**And the slot's picker changes meaning once the slot is a list.** In single mode it *is* the value; in list mode it names *what `+ add` appends*. Missing this was a data-loss bug: picking a second risk measure to add ran "set the slot to this value" and **silently destroyed the entries already in the list**. In list mode the picker must not write to the slot at all. This is a genuine UX wart — one control with two meanings — and T5 should consider separating them (e.g. a dedicated `add [type] ▾` control). Emptying the list returns the slot to unset, so the picker resumes being the value. **Feeds T5.**
 
 ### 4. Required vs defaulted kwargs is discoverable, but only by probing
 
