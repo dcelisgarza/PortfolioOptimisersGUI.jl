@@ -57,7 +57,24 @@ wrapper(T) = Base.unwrap_unionall(T).name.wrapper
 # source of truth for introspection.
 # ---------------------------------------------------------------------------
 
-function slot_types(T::Type)
+# ---------------------------------------------------------------------------
+# Reflection is PURE in its type, and expensive: `required_kwargs` probes the
+# constructor by actually building objects, `options_for` enumerates subtypes,
+# `default_for` constructs a real instance. Recomputing them at every visit of
+# the type graph is what made the form crawl and the server appear to hang.
+# Memoise them. (Caches are built lazily at run time, never baked in at
+# precompile time — a load-time const would freeze to Any and come back empty.)
+# ---------------------------------------------------------------------------
+const _SLOT_TYPES = Dict{Any,Tuple}()
+const _REQUIRED = Dict{Any,Vector{Symbol}}()
+const _OPTIONS = Dict{Any,Vector{Type}}()
+const _DEFAULT_INST = Dict{Any,Any}()
+
+memo(d::Dict, k, f) = get!(d, k) do
+    f()
+end
+
+function _slot_types(T::Type)
     n = fieldcount(T)
     best = nothing
     for m in methods(T)
@@ -69,6 +86,7 @@ function slot_types(T::Type)
     end
     best === nothing ? fieldtypes(T) : Tuple(best)
 end
+slot_types(T::Type) = memo(_SLOT_TYPES, T, () -> _slot_types(T))
 
 basetype(T) = Base.unwrap_unionall(T isa UnionAll ? T : T)
 
@@ -119,10 +137,27 @@ function offerable(T)
     return true
 end
 
+"""
+Types whose concrete subtypes must NEVER be enumerated: they are OPEN universes.
+
+`TimeDependent.val` is typed `Union{AbstractVector, Base.Callable, …}`, and
+`Base.Callable == Union{Function, Type}`. Asking for the concrete subtypes of
+`Function` means every function in the running session — thousands, and growing —
+and `Type`'s subtype graph does not bottom out at all. Enumerating them is both
+meaningless (you cannot pick a function from a dropdown) and non-terminating: this
+is what hung the server on "+ add" for any slot whose union admits a callable.
+
+A slot like this is opaque — it needs an override widget, not a picker.
+"""
+const OPEN_UNIVERSE = (Any, Function, Type, DataType, Module)
+enumerable(A) = !any(OPEN_UNIVERSE) do U
+    A === U || (Base.unwrap_unionall(A) === Base.unwrap_unionall(U))
+end
+
 "All CONCRETE subtypes of an abstract type, recursively."
 function concretes(A::Type)
     out = Type[]
-    A === Any && return out
+    enumerable(A) || return out
     stack = Type[A]
     seen = Set{Any}()
     while !isempty(stack)
@@ -149,14 +184,16 @@ function concretes(A::Type)
     return out
 end
 
-"Concrete options a slot can hold (walks Union branches)."
-function options_for(core)
+"Concrete options a slot can hold (walks Union branches). Memoised — see above."
+options_for(core) = memo(_OPTIONS, core, () -> _options_for(core))
+function _options_for(core)
     core === Any && return Type[]
     branches = core isa Union ? collect(Base.uniontypes(core)) : Any[core]
     out = Type[]
     for b in branches
         b === Nothing && continue
         _scalarish(b) && continue            # leaf scalars get widgets, not pickers
+        enumerable(b) || continue            # Function/Type: open universe, never enumerate
         u = try
             Base.unwrap_unionall(b)
         catch
@@ -200,15 +237,35 @@ function scalar_branch_of(core)
 end
 
 "Slots reflection cannot describe: no concrete options, not a scalar."
-const OPAQUE = (Any, NamedTuple, Pair, AbstractDict, Function)
+const OPAQUE = (Any, NamedTuple, Pair, AbstractDict, Function, Type, DataType, Module)
 _opaque1(b) =
     b === Any ||
     any(O -> b === O || Base.unwrap_unionall(b) === Base.unwrap_unionall(O), OPAQUE)
 is_opaque(core) = core isa Union ? any(_opaque1, Base.uniontypes(core)) : _opaque1(core)
 
-"Best-effort default instance of T, filling required kwargs recursively."
-function default_for(T::Type; depth = 0)
-    depth > 6 && return nothing
+"""
+Best-effort default instance of T. Memoised: it constructs a real object, and it
+is called for every node built. The instance is only ever READ (to learn each
+slot's library default), never mutated, so sharing one per type is safe.
+"""
+const _DEFAULTING = Set{Any}()
+
+function default_for(T::Type)
+    haskey(_DEFAULT_INST, T) && return _DEFAULT_INST[T]
+    # CYCLE, not depth: if we are already partway through default-constructing T,
+    # then T's required-slot chain leads back to T and no default instance exists.
+    # Say so instead of recursing forever.
+    T in _DEFAULTING && return nothing
+    push!(_DEFAULTING, T)
+    try
+        _DEFAULT_INST[T] = _default_for(T)
+    finally
+        delete!(_DEFAULTING, T)
+    end
+    return _DEFAULT_INST[T]
+end
+
+function _default_for(T::Type)
     try
         return T()
     catch e
@@ -232,16 +289,16 @@ function default_for(T::Type; depth = 0)
                 c = classify(types[i])
                 opts = options_for(c.core)
                 cand = isempty(opts) ? nothing : first(opts)
-                kw[e2.var] =
-                    cand === nothing ? nothing : default_for(cand; depth = depth + 1)
+                kw[e2.var] = cand === nothing ? nothing : default_for(cand)
             end
         end
         return nothing
     end
 end
 
-"Kwargs of T that have NO default (must be supplied)."
-function required_kwargs(T::Type)
+"Kwargs of T that have NO default (must be supplied). Memoised — it probes by construction."
+required_kwargs(T::Type) = memo(_REQUIRED, T, () -> _required_kwargs(T))
+function _required_kwargs(T::Type)
     req = Symbol[]
     kw = Dict{Symbol,Any}()
     for _ = 1:fieldcount(T)
@@ -281,19 +338,31 @@ mutable struct Node
     libdefault::Dict{Symbol,String}   # what the LIBRARY defaults this slot to, if unset
 end
 
+"""
+Build the spec node for a type. **Strictly one level deep.**
+
+Earlier this eagerly built a Node for every required slot, recursively. That walks
+PortfolioOptimisers' whole type graph — and it is very nearly cyclic
+(`RiskTrackingError` needs an `AbstractBaseRiskMeasure`; risk measures can hold
+tracking), so it exploded and hung the server: the "+ add on an unset slot does
+nothing" bug was the click handler never returning.
+
+Nothing asked for those subtrees. A slot the user has not touched stays **unset**
+and takes the library's own default at build time (see `materialise`). We only
+read `default_for(T)` — a single instance the library constructs for us — to learn
+what each slot defaults to, so the picker can show it. Children are built lazily,
+when the user actually picks one. No recursion, so no depth cap and no cycle to
+guard against.
+"""
 function Node(T::Type)
     n = Node(T, Dict{Symbol,Any}(), Dict{Symbol,String}())
     inst = default_for(T)
     names, types = fieldnames(T), slot_types(T)
-    req = required_kwargs(T)
     for (f, ty) in zip(names, types)
         c = classify(ty)
         key = (wrapper(T), f)
         if haskey(SLOT_DEFAULT, key)
             n.kw[f] = SLOT_DEFAULT[key]()
-        elseif f in req
-            opts = options_for(c.core)
-            n.kw[f] = isempty(opts) ? nothing : Node(first(opts))
         elseif inst !== nothing
             v = getfield(inst, f)
             scalarv = v isa Number || v isa Bool || v isa AbstractString
@@ -315,9 +384,22 @@ function Node(T::Type)
     return n
 end
 
-"Turn the spec back into a real PortfolioOptimisers object."
+"""
+Turn the spec back into a real PortfolioOptimisers object.
+
+Unset slots are omitted so the library's own defaults apply — except **required**
+kwargs, which have no default to fall back on. Those are filled from the library's
+own default instance (`default_for(T)`), which is exactly the value the user would
+have got had we built the subtree eagerly. This is what lets `Node` stay one level
+deep.
+"""
 function materialise(n::Node)
     kw = Dict{Symbol,Any}()
+    inst = default_for(n.T)
+    for f in required_kwargs(n.T)
+        v = n.kw[f]
+        (v === nothing && inst !== nothing) && (kw[f] = getfield(inst, f))
+    end
     for (k, v) in n.kw
         v === nothing && continue          # unset => omit => library default applies
         kw[k] =
@@ -354,26 +436,49 @@ end
 # function call, no framework impedance.
 # ---------------------------------------------------------------------------
 
-function scalar_widget(node::Node, f::Symbol, v)
-    if v isa Bool
-        cb = Checkbox(v)
+"Does any branch of this slot type accept a T?"
+branch_accepts(core, ::Type{T}) where {T} =
+    core isa Union ? any(b -> b isa DataType && b <: T, Base.uniontypes(core)) :
+    (core isa DataType && core <: T)
+
+"""
+The empty value to seed a scalar widget with — derived from the SLOT TYPE.
+
+Seeding from a hardcoded `0.0` renders `fixed::Bool` (WeightsTracking) as a
+number box: the widget was being chosen from the placeholder value rather than
+from the declared type. Bool must come before Number — `Bool <: Number`.
+"""
+function scalar_seed(core)
+    branch_accepts(core, Bool) && return false
+    branch_accepts(core, Integer) && return 0
+    branch_accepts(core, Number) && return 0.0
+    branch_accepts(core, AbstractString) && return ""
+    core === Symbol && return ""
+    return ""
+end
+
+"Widget for a scalar slot. Chosen from the slot TYPE, with the value only as a seed."
+function scalar_widget(node::Node, f::Symbol, v, core)
+    v === nothing && (v = scalar_seed(core))
+
+    if v isa Bool || branch_accepts(core, Bool)
+        cb = Checkbox(v isa Bool ? v : false)
         on(cb.value) do x
-            ;
-            node.kw[f] = x;
+            node.kw[f] = x
         end
         return cb
-    elseif v isa Number
-        ni = NumberInput(Float64(v))
+    elseif v isa Number || branch_accepts(core, Number)
+        isint = branch_accepts(core, Integer) && !branch_accepts(core, AbstractFloat)
+        n0 = v isa Number ? v : 0
+        ni = NumberInput(isint ? Float64(round(n0)) : Float64(n0))
         on(ni.value) do x
-            ;
-            node.kw[f] = x;
+            node.kw[f] = isint ? round(Int, x) : x
         end
         return ni
     else
-        tf = TextField(v === nothing ? "" : string(v))
+        tf = TextField(string(v))
         on(tf.value) do x
-            ;
-            node.kw[f] = isempty(x) ? nothing : x;
+            node.kw[f] = isempty(x) ? nothing : x
         end
         return tf
     end
@@ -408,7 +513,10 @@ function slot_row(node::Node, f::Symbol, ty, on_dirty)
     # --- plain scalar leaf: mandatory AND purely scalar (sc::Number, brt::Bool).
     # Nothing to choose between, so no mode selector — just the box.
     if is_scalar(c.core) && !c.optional && !(cur isa Node)
-        w = scalar_widget(node, f, cur === nothing ? 0.0 : cur)
+        # a mandatory scalar with no value has no library default to fall back on,
+        # so the seed the widget shows must also be what the spec holds
+        cur === nothing && (node.kw[f] = cur = scalar_seed(c.core))
+        w = scalar_widget(node, f, cur, c.core)
         on(x -> on_dirty(), w.value)
         return DOM.div(
             DOM.label(string(f); style = "font-weight:600;width:9em;display:inline-block"),
@@ -436,11 +544,27 @@ function slot_row(node::Node, f::Symbol, ty, on_dirty)
     SCALAR = has_scalar ? "number…" : nothing
     subtree = Observable{Any}(DOM.div())
 
+    # Bonito widgets fire their value observable when they are CONSTRUCTED. Since
+    # rebuild! constructs widgets, any handler that calls rebuild! can be re-entered
+    # by its own children's construction echoes — an infinite loop that pegs the
+    # server at 100% CPU (it did). Rebuilding is not re-entrant; refuse to nest.
+    rebuilding = Ref(false)
+
     function rebuild!()
+        rebuilding[] && return
+        rebuilding[] = true
+        try
+            _rebuild!()
+        finally
+            rebuilding[] = false
+        end
+    end
+
+    function _rebuild!()
         v = node.kw[f]
         if v isa Number || v isa AbstractString || v isa Bool
             # scalar mode: an editable box, live-bound back into the spec
-            w = scalar_widget(node, f, v)
+            w = scalar_widget(node, f, v, c.core)
             on(x -> on_dirty(), w.value)
             subtree[] = DOM.div(w; style = "margin-left:1.2em")
         elseif v isa Node
@@ -467,7 +591,13 @@ function slot_row(node::Node, f::Symbol, ty, on_dirty)
                     index = something(findfirst(==(shortname(child.T)), labels), 1),
                 )
                 on(rowsel.value) do choice
-                    node.kw[f][i] = Node(opts[findfirst(==(choice), labels)])
+                    # A freshly-built Dropdown fires its value observable on
+                    # construction. Rebuilding on that echo builds another
+                    # Dropdown, which echoes again — an infinite loop that pegs
+                    # the server. Only react to an ACTUAL change of type.
+                    Tnew = opts[findfirst(==(choice), labels)]
+                    child.T === Tnew && return
+                    node.kw[f][i] = Node(Tnew)
                     rebuild!()
                     on_dirty()
                 end
@@ -534,6 +664,19 @@ function slot_row(node::Node, f::Symbol, ty, on_dirty)
     end
 
     on(sel.value) do choice
+        # CONSTRUCTION ECHO: a Dropdown fires its value when built, and rebuild!
+        # builds Dropdowns. Acting on an echo re-creates the slot's Node (an
+        # expensive probe) and rebuilds its children, whose Dropdowns echo in
+        # turn — the recursion pegged the server. If the choice already matches
+        # the slot's state, there is nothing to do.
+        st = node.kw[f]
+        if (st isa Node && shortname(st.T) == choice) ||
+           (st === nothing && choice == unset) ||
+           (st isa Explicit && choice == NOTHING) ||
+           ((st isa Number || st isa Bool || st isa AbstractString) && choice == SCALAR)
+            return
+        end
+
         # LIST MODE: the slot already holds a vector, so the picker is no longer
         # "the value" — it names what "+ add" will append. Selecting a type here
         # must NOT replace the list (that silently destroyed the entries already
@@ -548,10 +691,12 @@ function slot_row(node::Node, f::Symbol, ty, on_dirty)
         elseif choice == NOTHING
             node.kw[f] = Explicit()
         elseif choice == SCALAR
-            # entering scalar mode: seed with the library default if it was a
-            # number, else zero. rebuild! then renders the editable box.
+            # entering scalar mode: keep the previous scalar if there was one,
+            # else seed an empty value OF THE RIGHT TYPE (false for a Bool slot,
+            # not 0.0). rebuild! then renders the matching widget.
             prev = node.kw[f]
-            node.kw[f] = prev isa Number ? prev : 0.0
+            node.kw[f] = (prev isa Number || prev isa Bool || prev isa AbstractString) ?
+                         prev : scalar_seed(c.core)
         else
             T = opts[findfirst(==(choice), labels)]
             node.kw[f] = Node(T)

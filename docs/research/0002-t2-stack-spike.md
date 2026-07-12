@@ -83,6 +83,35 @@ The naive alternative (always append `subtypes(A)[1]`) produces exactly the obse
 
 **And the slot's picker changes meaning once the slot is a list.** In single mode it *is* the value; in list mode it names *what `+ add` appends*. Missing this was a data-loss bug: picking a second risk measure to add ran "set the slot to this value" and **silently destroyed the entries already in the list**. In list mode the picker must not write to the slot at all. This is a genuine UX wart — one control with two meanings — and T5 should consider separating them (e.g. a dedicated `add [type] ▾` control). Emptying the list returns the slot to unset, so the picker resumes being the value. **Feeds T5.**
 
+### 3d. NEVER enumerate an open universe — `Function` and `Type` are not pickable
+
+This one hung the server hard, and it is the single sharpest constraint on the introspection strategy.
+
+`TimeDependent.val` is typed `Union{AbstractVector, Base.Callable, …}`, and **`Base.Callable == Union{Function, Type}`**. A generic "enumerate the concrete subtypes of this abstract slot" walks `subtypes(Function)` — every function in the running session, thousands of them, growing with every package loaded — and `subtypes(Type)`, whose graph does not bottom out at all. The form froze mid-render and pegged Julia at 100% CPU; `+ add` on any slot whose union admits a callable simply never returned, which presented as *"the button does nothing"*.
+
+`TimeDependent` appears in **~20 of `JuMPOptimiser`'s slots** (`bgt`, `sbgt`, `lt`, `st`, `tn`, `tr`, `card`, …), so this is not an exotic corner.
+
+**Rule: subtype enumeration must be refused for open universes** (`Any`, `Function`, `Type`, `DataType`, `Module`). A slot admitting one is **opaque** — it needs an override widget (a function is chosen by *writing* one, not by picking from a list), and it must be *detected as opaque before enumeration is attempted*, not after. **Feeds T4 directly** — any introspection design that says "abstract slot → list its concrete subtypes" is wrong as stated, and will hang on the first callable slot it meets.
+
+### 3e. Build the spec tree LAZILY — one level deep
+
+The spike originally filled every **required** slot by recursively constructing a child node for its default type. That walks the library's whole type graph, which is very nearly cyclic (`RiskTrackingError` requires an `AbstractBaseRiskMeasure`; risk measures can hold tracking), and it is doing work nobody asked for.
+
+The fix is not a depth cap or a cycle guard — it is **not doing it**:
+
+- A `Node` is **one level deep**. Slots the user has not touched stay **unset**.
+- The library's own default instance (`default_for(T)`, which the library constructs happily) is read *only* to learn what each slot defaults to, so the picker can display `— default: JuMPOptimiser —`.
+- **`materialise` fills required-but-unset kwargs from that default instance** — exactly the value an eager tree would have produced.
+- Children are built when the user actually picks one.
+
+Consequence for the UX: the form opens **shallow** — `MeanRisk` shows `opt` as `— default: JuMPOptimiser —`, and you expand it by choosing it. That is arguably the right default anyway (a 40-slot tree does not unfurl in your face), but it *is* a UX decision T5 must own.
+
+Consequence for the IR: the spec naturally stores **only what the user set** (T6).
+
+### 3f. Reflection is pure per type, and expensive — memoise it
+
+`required_kwargs` probes by *constructing objects* in a `try`/`catch` loop; `default_for` constructs a real instance; `options_for`/`concretes` walk the subtype graph. All are pure functions of the type, and all were being recomputed at every visit — the form crawled. They are now memoised in plain `Dict`s built **at run time**. (Never bake such a cache into a load-time `const`: cross-module `eval` at precompile time degrades the types to `Any` and the cache comes back empty.)
+
 ### 4. Required vs defaulted kwargs is discoverable, but only by probing
 
 `MeanRisk` requires `opt`; `JuMPOptimiser` requires `slv`; `Solver` requires `solver`. There is no reflective list of "kwargs without defaults" — the spike recovers it by calling `T(; kw...)` and catching `UndefKeywordError` in a loop (`required_kwargs`). It works, but it's a probe, not an introspection. An alternative (parsing defaults out of the source) is a T4 question.
