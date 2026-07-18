@@ -5,6 +5,7 @@ PortfolioOptimisersGUI = "54ab21c9-f8d7-5af7-a33b-8d663c3a89b5"
 
 [compat]
 Documenter = "1"
+LiveServer = "1.5.0"
 
 [sources]
 PortfolioOptimisersGUI = {path = ".."}
